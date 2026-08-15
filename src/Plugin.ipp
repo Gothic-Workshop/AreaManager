@@ -7,6 +7,7 @@
 #include <cmath>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -33,6 +34,18 @@ namespace GOTHIC_NAMESPACE
 			return normalized;
 		}
 
+		std::string NormalizePortalRoomName(const char* value)
+		{
+			std::string normalized = value != nullptr ? value : "";
+
+			std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char character)
+			{
+				return static_cast<char>(std::toupper(character));
+			});
+
+			return normalized;
+		}
+
 		struct Point
 		{
 			float x;
@@ -47,8 +60,11 @@ namespace GOTHIC_NAMESPACE
 			{
 			}
 
-			void AddPoint(float x, float z)
+			bool AddPoint(float x, float z)
 			{
+				if (!portalRooms_.empty())
+					return false;
+
 				points_.push_back({ x, z });
 
 				if (!hasBounds_)
@@ -56,7 +72,7 @@ namespace GOTHIC_NAMESPACE
 					minX_ = maxX_ = x;
 					minZ_ = maxZ_ = z;
 					hasBounds_ = true;
-					return;
+					return true;
 				}
 
 				if (x < minX_)
@@ -70,6 +86,16 @@ namespace GOTHIC_NAMESPACE
 
 				if (z > maxZ_)
 					maxZ_ = z;
+
+				return true;
+			}
+
+			bool AddPortalRoom(std::string portalRoom)
+			{
+				if (!points_.empty() || portalRoom.empty())
+					return false;
+
+				return portalRooms_.insert(std::move(portalRoom)).second;
 			}
 
 			bool SetHeight(float minY, float maxY)
@@ -112,7 +138,7 @@ namespace GOTHIC_NAMESPACE
 
 			bool IsValid() const
 			{
-				return points_.size() >= 3 && !world_.empty();
+				return (points_.size() >= 3 || !portalRooms_.empty()) && !world_.empty();
 			}
 
 			bool IsIn(float x, float y, float z, const std::string& world) const
@@ -122,13 +148,7 @@ namespace GOTHIC_NAMESPACE
 
 			bool ContainsPosition(float x, float y, float z) const
 			{
-				if (!IsValid())
-					return false;
-
-				if (hasMinHeight_ && y < minY_)
-					return false;
-
-				if (hasMaxHeight_ && y > maxY_)
+				if (points_.size() < 3 || !ContainsHeight(y))
 					return false;
 
 				if (x < minX_ || x > maxX_ || z < minZ_ || z > maxZ_)
@@ -153,13 +173,33 @@ namespace GOTHIC_NAMESPACE
 				return isIn;
 			}
 
+			bool ContainsHero(float x, float y, float z, const std::string& portalRoom) const
+			{
+				if (!portalRooms_.empty())
+					return ContainsHeight(y) && portalRooms_.contains(portalRoom);
+
+				return ContainsPosition(x, y, z);
+			}
+
 			const std::string& World() const
 			{
 				return world_;
 			}
 
 		private:
+			bool ContainsHeight(float y) const
+			{
+				if (hasMinHeight_ && y < minY_)
+					return false;
+
+				if (hasMaxHeight_ && y > maxY_)
+					return false;
+
+				return true;
+			}
+
 			std::vector<Point> points_;
+			std::unordered_set<std::string> portalRooms_;
 			std::string world_;
 
 			bool hasMinHeight_ = false;
@@ -214,8 +254,14 @@ namespace GOTHIC_NAMESPACE
 				if (area == nullptr || !std::isfinite(x) || !std::isfinite(z))
 					return false;
 
-				area->AddPoint(x, z);
-				return true;
+				return area->AddPoint(x, z);
+			}
+
+			bool AddPortalRoom(int handle, const zSTRING& portalRoom)
+			{
+				auto* area = FindArea(handle);
+				return area != nullptr
+					&& area->AddPortalRoom(NormalizePortalRoomName(portalRoom.ToChar()));
 			}
 
 			bool SetHeight(int handle, float minY, float maxY)
@@ -263,7 +309,11 @@ namespace GOTHIC_NAMESPACE
 					return false;
 
 				const zVEC3 position = player->GetPositionWorld();
-				return area->ContainsPosition(position[0], position[1], position[2]);
+				return area->ContainsHero(
+					position[0],
+					position[1],
+					position[2],
+					CurrentPlayerPortalRoom());
 			}
 
 			bool Add(int handle, int onEnter, int onExit)
@@ -376,12 +426,22 @@ namespace GOTHIC_NAMESPACE
 				return ogame->IsInWorld(filename) != 0;
 			}
 
+			std::string CurrentPlayerPortalRoom() const
+			{
+				if (player == nullptr)
+					return {};
+
+				const zSTRING* portalRoom = player->GetSectorNameVobIsIn();
+				return NormalizePortalRoomName(portalRoom != nullptr ? portalRoom->ToChar() : nullptr);
+			}
+
 			void Process()
 			{
 				if (player == nullptr || ogame == nullptr || ogame->GetWorld() == nullptr)
 					return;
 
 				const zVEC3 position = player->GetPositionWorld();
+				const std::string portalRoom = CurrentPlayerPortalRoom();
 				std::vector<Transition> transitions;
 				transitions.reserve(registrations_.size());
 
@@ -391,7 +451,8 @@ namespace GOTHIC_NAMESPACE
 					if (area == nullptr || !IsCurrentWorld(*area))
 						continue;
 
-					const bool isIn = area->ContainsPosition(position[0], position[1], position[2]);
+					const bool isIn = area->ContainsHero(
+						position[0], position[1], position[2], portalRoom);
 					if (isIn == registration.heroInside)
 						continue;
 
@@ -466,6 +527,16 @@ namespace GOTHIC_NAMESPACE
 			parser->GetParameter(x);
 			parser->GetParameter(handle);
 			parser->SetReturn(static_cast<int>(AreaManager::Instance().AddPoint(handle, x, z)));
+			return 0;
+		}
+
+		int __cdecl External_AddPortalRoom()
+		{
+			zSTRING portalRoom;
+			int handle;
+			parser->GetParameter(portalRoom);
+			parser->GetParameter(handle);
+			parser->SetReturn(static_cast<int>(AreaManager::Instance().AddPortalRoom(handle, portalRoom)));
 			return 0;
 		}
 
@@ -601,6 +672,8 @@ namespace GOTHIC_NAMESPACE
 				zPAR_TYPE_INT, zPAR_TYPE_STRING, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_ADDPOINT", External_AddPoint,
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_FLOAT, zPAR_TYPE_FLOAT, zPAR_TYPE_VOID);
+			scriptParser->DefineExternal("AM_ADDPORTALROOM", External_AddPortalRoom,
+				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_STRING, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_SETHEIGHT", External_SetHeight,
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_FLOAT, zPAR_TYPE_FLOAT, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_SETMINHEIGHT", External_SetMinHeight,

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added portal-room areas with support for assigning multiple rooms to one area.
+
 ## 1.0.0
 
 - Implemented polygon areas with optional Y bounds.

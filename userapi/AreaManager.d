@@ -3,6 +3,7 @@
 
 func int AM_Create(var string world) {};
 func int AM_AddPoint(var int area, var float x, var float z) {};
+func int AM_AddPortalRoom(var int area, var string portalRoom) {};
 func int AM_SetHeight(var int area, var float minY, var float maxY) {};
 func int AM_SetMinHeight(var int area, var float minY) {};
 func int AM_SetMaxHeight(var int area, var float maxY) {};

@@ -10,7 +10,7 @@ include(generate_ipp_translation_units)
 include(configure_msvc_wine_intellisense)
 
 project(AreaManager
-	DESCRIPTION "Polygon area manager with Daedalus externals for Gothic"
+	DESCRIPTION "Polygon and portal-room area manager with Daedalus externals for Gothic"
 	VERSION ${PROJECT_VERSION}
 )
 
