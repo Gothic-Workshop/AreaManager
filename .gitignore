@@ -19,3 +19,4 @@
 # CMake user config
 
 CMakeUserConfigPresets.json
+CMakeUserPresets.json

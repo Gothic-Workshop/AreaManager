@@ -6,8 +6,10 @@
 #ifdef __@PlatformSuffix@
 #define GOTHIC_NAMESPACE @GothicNamespace@
 #define ENGINE Engine_@PlatformSuffix@
+#define GOTHIC_SUPPORTS_SNOW @GothicSupportsSnow@
 HOOKSPACE(@GothicNamespace@, GetGameVersion() == ENGINE);
 #include "@IppFile@"
+#undef GOTHIC_SUPPORTS_SNOW
 #undef GOTHIC_NAMESPACE
 #undef ENGINE
 #endif

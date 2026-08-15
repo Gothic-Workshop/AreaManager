@@ -17,9 +17,9 @@ project(AreaManager
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# By default template uses dynamically linked union-api target to avoid compatibility problems.
-# If you want to produce a standalone plugin, set this option to OFF
-set(GENERATE_UNION_API_DLL ON)
+# Link the Union API implementation into the plugin by default so the release
+# contains only AreaManager.dll and does not require a separate UnionAPI.dll.
+option(GENERATE_UNION_API_DLL "Build and dynamically link the Union API runtime" OFF)
 
 # By default template generates .vdf with the .dll and files form \vdf\_Work and \vdf\System
 # If you want to produce only the .dll, set this option to OFF
@@ -93,6 +93,9 @@ if (GENERATE_VDF)
 				COMMAND ${CMAKE_COMMAND} -E echo "[Post Build] $<TARGET_FILE_NAME:union_api_dll> copied to: ${VDF_BUILD_AUTORUN_DIR}"
 			DEPENDS union_api_dll
 		)
+	else()
+		# Do not let a DLL left by an older dynamic build leak into the VDF.
+		file(REMOVE "${VDF_BUILD_AUTORUN_DIR}UnionAPI.dll")
 	endif()
 
 	add_custom_command(TARGET ${CMAKE_PROJECT_NAME}

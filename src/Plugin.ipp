@@ -13,12 +13,24 @@
 
 namespace GOTHIC_NAMESPACE
 {
+	void EnsureAreaManagerWeatherHook();
+
 	namespace AreaManagerPlugin
 	{
 		constexpr DWORD ProcessIntervalMs = 500;
 		constexpr float DebugLineHeightOffset = 20.0F;
+		constexpr float WeatherFadeDurationSeconds = 3.0F;
+		constexpr float MaxWeatherFrameTimeSeconds = 0.25F;
+		constexpr float FullWeatherWeight = 1.0F;
 		constexpr int InvalidAreaHandle = 0;
 		constexpr int InvalidFunctionIndex = -1;
+
+		enum class Weather
+		{
+			None = 0,
+			Rain = 1,
+			Snow = 2
+		};
 
 		std::string NormalizeWorldName(const char* value)
 		{
@@ -137,6 +149,11 @@ namespace GOTHIC_NAMESPACE
 				hasMaxHeight_ = false;
 			}
 
+			void SetWeather(Weather weather)
+			{
+				weather_ = weather;
+			}
+
 			bool IsValid() const
 			{
 				const bool polygonValid = points_.size() >= 3
@@ -228,6 +245,11 @@ namespace GOTHIC_NAMESPACE
 			const std::string& World() const
 			{
 				return world_;
+			}
+
+			Weather GetWeather() const
+			{
+				return weather_;
 			}
 
 		private:
@@ -421,6 +443,7 @@ namespace GOTHIC_NAMESPACE
 			mutable std::vector<Triangle> ceilingTriangles_;
 			std::unordered_set<std::string> portalRooms_;
 			std::string world_;
+			Weather weather_ = Weather::None;
 			bool hasPointCeilings_ = false;
 			mutable bool ceilingTrianglesDirty_ = false;
 			mutable bool ceilingTrianglesValid_ = false;
@@ -524,6 +547,29 @@ namespace GOTHIC_NAMESPACE
 				return true;
 			}
 
+			bool SetWeather(int handle, int weatherValue)
+			{
+				auto* area = FindArea(handle);
+				if (area == nullptr
+					|| weatherValue < static_cast<int>(Weather::None)
+					|| weatherValue > static_cast<int>(Weather::Snow))
+				{
+					return false;
+				}
+
+#if !GOTHIC_SUPPORTS_SNOW
+				if (weatherValue == static_cast<int>(Weather::Snow))
+					return false;
+#endif
+
+				if (weatherValue != static_cast<int>(Weather::None))
+					EnsureAreaManagerWeatherHook();
+
+				area->SetWeather(static_cast<Weather>(weatherValue));
+				UpdateWeatherOverride();
+				return true;
+			}
+
 			bool IsIn(int handle, float x, float y, float z, const zSTRING& world) const
 			{
 				const auto* area = FindArea(handle);
@@ -563,13 +609,21 @@ namespace GOTHIC_NAMESPACE
 
 			bool Remove(int handle)
 			{
-				return registrations_.erase(handle) != 0;
+				const bool removed = registrations_.erase(handle) != 0;
+				if (removed)
+					UpdateWeatherOverride();
+
+				return removed;
 			}
 
 			bool Destroy(int handle)
 			{
 				registrations_.erase(handle);
-				return areas_.erase(handle) != 0;
+				const bool destroyed = areas_.erase(handle) != 0;
+				if (destroyed)
+					UpdateWeatherOverride();
+
+				return destroyed;
 			}
 
 			bool IsRegistered(int handle) const
@@ -607,6 +661,7 @@ namespace GOTHIC_NAMESPACE
 				registrations_.clear();
 				areas_.clear();
 				debugEnabled_ = false;
+				ResetWeatherOverride();
 			}
 
 			void RenderDebug() const
@@ -645,8 +700,294 @@ namespace GOTHIC_NAMESPACE
 				Process();
 			}
 
+			bool IsWeatherOverrideActive() const
+			{
+				return activeWeather_ != Weather::None;
+			}
+
+			bool ProcessWeatherEffect(zCSkyControler_Outdoor* sky)
+			{
+				if (sky == nullptr || activeWeather_ == Weather::None)
+					return false;
+
+				if (weatherSky_ != sky)
+				{
+					if (weatherStateCaptured_)
+					{
+						ForgetWeatherState();
+						weatherWeight_ = 0.0F;
+						UpdateWeatherOverride();
+						activeWeather_ = desiredWeather_;
+						if (activeWeather_ == Weather::None)
+							return false;
+					}
+
+					ForgetWeatherState();
+					CaptureWeatherState(sky);
+				}
+
+				if (!AdvanceWeatherTransition())
+					return false;
+
+				const float weatherWeight = SmoothWeatherWeight(weatherWeight_);
+
+				zCSkyControler::s_skyEffectsEnabled = TRUE;
+				sky->rainFX.camLocationHint = zCSkyControler::zCAM_OUTSIDE_SECTOR;
+				sky->rainFX.timeStartRain = -1000.0F;
+				sky->rainFX.timeStopRain = 1000.0F;
+
+#if GOTHIC_SUPPORTS_SNOW
+				const zTWeather engineWeather = activeWeather_ == Weather::Snow
+					? zTWEATHER_SNOW
+					: zTWEATHER_RAIN;
+				sky->m_bDontRain = FALSE;
+				sky->m_enuWeather = engineWeather;
+				sky->rainFX.renderLightning = FALSE;
+#endif
+
+				zCOutdoorRainFX* rainEffect = sky->rainFX.outdoorRainFX;
+				if (rainEffect == nullptr)
+					return true;
+
+#if GOTHIC_SUPPORTS_SNOW
+				rainEffect->SetWeatherType(engineWeather);
+#endif
+
+				sky->rainFX.outdoorRainFXWeight = weatherWeight;
+				sky->rainFX.soundVolume = weatherWeight;
+
+				if (weatherWeight <= 0.0F)
+				{
+					StopWeatherParticles(sky);
+					return true;
+				}
+
+#if GOTHIC_SUPPORTS_SNOW
+				if (!sky->rainFX.m_bRaining)
+					++sky->rainFX.m_iRainCtr;
+
+				sky->rainFX.m_bRaining = TRUE;
+#endif
+
+				zTRenderContext renderContext;
+				ZeroMemory(&renderContext, sizeof(renderContext));
+				renderContext.cam = zCCamera::activeCam;
+				renderContext.vob = renderContext.cam != nullptr
+					? renderContext.cam->connectedVob
+					: nullptr;
+				renderContext.world = renderContext.vob != nullptr
+					? renderContext.vob->homeWorld
+					: ogame != nullptr ? ogame->GetWorld() : nullptr;
+
+				if (renderContext.cam == nullptr || renderContext.world == nullptr)
+					return true;
+
+				renderContext.cam->Activate();
+
+				if (!weatherEffectInitialized_)
+				{
+					rainEffect->SetEffectWeight(FullWeatherWeight, weatherWeight);
+					rainEffect->m_effectWeight = weatherWeight;
+
+					if (renderContext.vob != nullptr)
+					{
+						zVEC3 previousPosition = renderContext.vob->GetPositionWorld();
+						previousPosition[0] += 100000.0F;
+						rainEffect->m_camPosLastFrame = previousPosition;
+					}
+
+					weatherEffectInitialized_ = true;
+				}
+				else
+				{
+					rainEffect->m_effectWeight = weatherWeight;
+				}
+
+				rainEffect->UpdateParticles();
+				rainEffect->CreateParticles(renderContext);
+
+				zCOLOR color = sky->GetDaylightColorFromIntensity(255);
+				color.alpha = 255;
+				rainEffect->RenderParticles(renderContext, color);
+				sky->rainFX.outdoorRainFXWeight = weatherWeight;
+				return true;
+			}
+
 		private:
 			AreaManager() = default;
+
+			static zCSkyControler_Outdoor* GetOutdoorSky()
+			{
+				zCSkyControler* sky = zCSkyControler::s_activeSkyControler;
+				if (sky == nullptr && ogame != nullptr && ogame->GetWorld() != nullptr)
+					sky = ogame->GetWorld()->GetActiveSkyControler();
+
+				return zDYNAMIC_CAST<zCSkyControler_Outdoor>(sky);
+			}
+
+			void UpdateWeatherOverride()
+			{
+				if (player == nullptr || ogame == nullptr || ogame->GetWorld() == nullptr)
+				{
+					ResetWeatherOverride();
+					return;
+				}
+
+				int selectedHandle = InvalidAreaHandle;
+				Weather selectedWeather = Weather::None;
+
+				for (const auto& [handle, registration] : registrations_)
+				{
+					if (!registration.heroInside || handle <= selectedHandle)
+						continue;
+
+					const Area* area = FindArea(handle);
+					if (area == nullptr || area->GetWeather() == Weather::None
+						|| !IsCurrentWorld(*area))
+					{
+						continue;
+					}
+
+					selectedHandle = handle;
+					selectedWeather = area->GetWeather();
+				}
+
+				SetActiveWeather(selectedWeather);
+			}
+
+			void SetActiveWeather(Weather weather)
+			{
+				if (weather == desiredWeather_)
+					return;
+
+				desiredWeather_ = weather;
+				if (activeWeather_ == Weather::None && desiredWeather_ != Weather::None)
+				{
+					activeWeather_ = desiredWeather_;
+					weatherWeight_ = 0.0F;
+					weatherEffectInitialized_ = false;
+				}
+			}
+
+			bool AdvanceWeatherTransition()
+			{
+				const float targetWeight = activeWeather_ == desiredWeather_
+					&& desiredWeather_ != Weather::None
+					? FullWeatherWeight
+					: 0.0F;
+				float frameTime = ztimer != nullptr ? ztimer->frameTimeFloatSecs : 0.0F;
+				if (!std::isfinite(frameTime) || frameTime < 0.0F)
+					frameTime = 0.0F;
+
+				frameTime = (std::min)(frameTime, MaxWeatherFrameTimeSeconds);
+				const float step = frameTime / WeatherFadeDurationSeconds;
+				if (weatherWeight_ < targetWeight)
+					weatherWeight_ = (std::min)(weatherWeight_ + step, targetWeight);
+				else if (weatherWeight_ > targetWeight)
+					weatherWeight_ = (std::max)(weatherWeight_ - step, targetWeight);
+
+				if (weatherWeight_ > 0.0F || targetWeight > 0.0F)
+					return true;
+
+				if (desiredWeather_ == Weather::None)
+				{
+					activeWeather_ = Weather::None;
+					RestoreWeatherState();
+					return false;
+				}
+
+				StopWeatherParticles(weatherSky_);
+				activeWeather_ = desiredWeather_;
+				weatherEffectInitialized_ = false;
+				return true;
+			}
+
+			static float SmoothWeatherWeight(float weight)
+			{
+				weight = std::clamp(weight, 0.0F, FullWeatherWeight);
+				return weight * weight * (3.0F - 2.0F * weight);
+			}
+
+			void ResetWeatherOverride()
+			{
+				desiredWeather_ = Weather::None;
+				activeWeather_ = Weather::None;
+				weatherWeight_ = 0.0F;
+				RestoreWeatherState();
+			}
+
+			void CaptureWeatherState(zCSkyControler_Outdoor* sky)
+			{
+				weatherSky_ = sky;
+				weatherStateCaptured_ = true;
+				weatherEffectInitialized_ = false;
+				savedSkyEffectsEnabled_ = zCSkyControler::s_skyEffectsEnabled;
+				savedCamLocationHint_ = sky->rainFX.camLocationHint;
+				savedRainStart_ = sky->rainFX.timeStartRain;
+				savedRainStop_ = sky->rainFX.timeStopRain;
+
+#if GOTHIC_SUPPORTS_SNOW
+				savedDontRain_ = sky->m_bDontRain;
+				savedWeather_ = sky->m_enuWeather;
+				savedRenderLightning_ = sky->rainFX.renderLightning;
+#endif
+			}
+
+			static void StopWeatherParticles(zCSkyControler_Outdoor* sky)
+			{
+				if (sky == nullptr)
+					return;
+
+				if (sky->rainFX.outdoorRainFX != nullptr)
+					sky->rainFX.outdoorRainFX->SetEffectWeight(0.0F, 0.0F);
+
+				sky->rainFX.outdoorRainFXWeight = 0.0F;
+				sky->rainFX.soundVolume = 0.0F;
+
+#if GOTHIC_SUPPORTS_SNOW
+				sky->rainFX.m_bRaining = FALSE;
+				sky->rainFX.renderLightning = FALSE;
+#endif
+			}
+
+			void RestoreWeatherState()
+			{
+				if (!weatherStateCaptured_)
+				{
+					ForgetWeatherState();
+					return;
+				}
+
+				zCSkyControler_Outdoor* sky = GetOutdoorSky();
+				if (sky != weatherSky_)
+				{
+					ForgetWeatherState();
+					return;
+				}
+
+				StopWeatherParticles(sky);
+				sky->rainFX.camLocationHint = savedCamLocationHint_;
+				sky->rainFX.timeStartRain = savedRainStart_;
+				sky->rainFX.timeStopRain = savedRainStop_;
+				zCSkyControler::s_skyEffectsEnabled = savedSkyEffectsEnabled_;
+
+#if GOTHIC_SUPPORTS_SNOW
+				sky->m_bDontRain = savedDontRain_;
+				sky->m_enuWeather = savedWeather_;
+				sky->rainFX.renderLightning = savedRenderLightning_;
+				if (sky->rainFX.outdoorRainFX != nullptr)
+					sky->rainFX.outdoorRainFX->SetWeatherType(savedWeather_);
+#endif
+
+				ForgetWeatherState();
+			}
+
+			void ForgetWeatherState()
+			{
+				weatherSky_ = nullptr;
+				weatherStateCaptured_ = false;
+				weatherEffectInitialized_ = false;
+			}
 
 			Area* FindArea(int handle)
 			{
@@ -695,7 +1036,10 @@ namespace GOTHIC_NAMESPACE
 			void Process()
 			{
 				if (player == nullptr || ogame == nullptr || ogame->GetWorld() == nullptr)
+				{
+					ResetWeatherOverride();
 					return;
+				}
 
 				const zVEC3 position = player->GetPositionWorld();
 				const std::string portalRoom = CurrentPlayerPortalRoom();
@@ -720,6 +1064,8 @@ namespace GOTHIC_NAMESPACE
 						isIn
 					});
 				}
+
+				UpdateWeatherOverride();
 
 				for (const auto& transition : transitions)
 					Dispatch(transition);
@@ -763,6 +1109,24 @@ namespace GOTHIC_NAMESPACE
 			int nextHandle_ = 1;
 			int currentCallbackArea_ = InvalidAreaHandle;
 			int processCallback_ = InvalidFunctionIndex;
+			Weather activeWeather_ = Weather::None;
+			Weather desiredWeather_ = Weather::None;
+			float weatherWeight_ = 0.0F;
+			zCSkyControler_Outdoor* weatherSky_ = nullptr;
+			bool weatherStateCaptured_ = false;
+			bool weatherEffectInitialized_ = false;
+			int savedSkyEffectsEnabled_ = FALSE;
+			zCSkyControler::zTCamLocationHint savedCamLocationHint_
+				= zCSkyControler::zCAM_OUTSIDE_SECTOR;
+			float savedRainStart_ = 0.0F;
+			float savedRainStop_ = 0.0F;
+
+#if GOTHIC_SUPPORTS_SNOW
+			int savedDontRain_ = FALSE;
+			zTWeather savedWeather_ = zTWEATHER_RAIN;
+			int savedRenderLightning_ = FALSE;
+#endif
+
 			DWORD lastProcessTime_ = 0;
 			bool timerStarted_ = false;
 			bool debugEnabled_ = false;
@@ -829,6 +1193,16 @@ namespace GOTHIC_NAMESPACE
 			int handle;
 			parser->GetParameter(handle);
 			parser->SetReturn(static_cast<int>(AreaManager::Instance().ClearHeight(handle)));
+			return 0;
+		}
+
+		int __cdecl External_SetWeather()
+		{
+			int weather;
+			int handle;
+			parser->GetParameter(weather);
+			parser->GetParameter(handle);
+			parser->SetReturn(static_cast<int>(AreaManager::Instance().SetWeather(handle, weather)));
 			return 0;
 		}
 
@@ -965,6 +1339,8 @@ namespace GOTHIC_NAMESPACE
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_FLOAT, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_CLEARHEIGHT", External_ClearHeight,
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_VOID);
+			scriptParser->DefineExternal("AM_SETWEATHER", External_SetWeather,
+				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_ISIN", External_IsIn,
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_FLOAT, zPAR_TYPE_FLOAT,
 				zPAR_TYPE_FLOAT, zPAR_TYPE_STRING, zPAR_TYPE_VOID);
@@ -992,8 +1368,16 @@ namespace GOTHIC_NAMESPACE
 	}
 
 	void __fastcall oCGame_Render_AreaManager(oCGame* self, void* vtable);
+	constexpr DWORD GameRenderAddress = ENGINE == Engine_G1
+		? 0x0063DBE0
+		: ENGINE == Engine_G1A
+			? 0x006648F0
+			: ENGINE == Engine_G2
+				? 0x0066B930
+				: 0x006C86A0;
+
 	auto Hook_oCGame_Render_AreaManager = Union::CreateHook(
-		SIGNATURE_OF(&oCGame::Render),
+		reinterpret_cast<void*>(GameRenderAddress),
 		&oCGame_Render_AreaManager,
 		Union::HookType::Hook_Detours);
 
@@ -1004,9 +1388,65 @@ namespace GOTHIC_NAMESPACE
 		AreaManagerPlugin::AreaManager::Instance().Tick();
 	}
 
+	void __fastcall zCSkyControler_Outdoor_ProcessRainFX_AreaManager(
+		zCSkyControler_Outdoor* self,
+		void* vtable);
+
+	constexpr DWORD ProcessRainFXAddress = ENGINE == Engine_G1
+		? 0x005C0DC0
+		: ENGINE == Engine_G1A
+			? 0x005DECA0
+			: ENGINE == Engine_G2
+				? 0x005E4180
+				: 0x005EAF30;
+
+	auto& GetAreaManagerWeatherHook()
+	{
+		static auto hook = Union::CreateHook(
+			reinterpret_cast<void*>(ProcessRainFXAddress),
+			&zCSkyControler_Outdoor_ProcessRainFX_AreaManager,
+			Union::HookType::Hook_Detours);
+		return hook;
+	}
+
+	void EnsureAreaManagerWeatherHook()
+	{
+		(void)GetAreaManagerWeatherHook();
+	}
+
+	void __fastcall zCSkyControler_Outdoor_ProcessRainFX_AreaManager(
+		zCSkyControler_Outdoor* self,
+		void* vtable)
+	{
+		auto& manager = AreaManagerPlugin::AreaManager::Instance();
+		if (!manager.IsWeatherOverrideActive())
+		{
+			GetAreaManagerWeatherHook()(self, vtable);
+			return;
+		}
+
+		bool originalCalled = false;
+		if (self->rainFX.outdoorRainFX == nullptr)
+		{
+			GetAreaManagerWeatherHook()(self, vtable);
+			originalCalled = true;
+		}
+
+		if (!manager.ProcessWeatherEffect(self) && !originalCalled)
+			GetAreaManagerWeatherHook()(self, vtable);
+	}
+
 	void __fastcall oCGame_DefineExternals_AreaManager(oCGame* self, void* vtable, zCParser* scriptParser);
+	constexpr DWORD DefineExternalsAddress = ENGINE == Engine_G1
+		? 0x006495B0
+		: ENGINE == Engine_G1A
+			? 0x006715F0
+			: ENGINE == Engine_G2
+				? 0x00677A00
+				: 0x006D4780;
+
 	auto Hook_oCGame_DefineExternals_AreaManager = Union::CreateHook(
-		SIGNATURE_OF(&oCGame::DefineExternals_Ulfi),
+		reinterpret_cast<void*>(DefineExternalsAddress),
 		&oCGame_DefineExternals_AreaManager,
 		Union::HookType::Hook_Detours);
 

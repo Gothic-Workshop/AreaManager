@@ -20,8 +20,9 @@ externals before `Gothic.dat` is parsed; the declaration file is an API referenc
 for editors and other tooling only. AreaManager must therefore be loaded while
 the scripts are compiled.
 
-Install either the generated `AreaManager.vdf` in `Gothic/Data`, or install
-`AreaManager.dll` in `Gothic/System/Autorun` together with the Union API runtime.
+Install either the generated `AreaManager.vdf` in `Gothic/Data`, or install the
+standalone `AreaManager.dll` in `Gothic/System/Autorun`. Union itself must be
+installed, but the plugin does not require a separate `UnionAPI.dll`.
 
 ## Example
 
@@ -51,6 +52,7 @@ func void Monastery_CreateArea()
 	AM_AddPoint(MonasteryArea, 52353.40, 18734.15);
 	AM_AddPoint(MonasteryArea, 49596.51, 23307.47);
 
+	AM_SetWeather(MonasteryArea, 1); // Rain
 	AM_SetDebug(TRUE);
 	AM_Add(MonasteryArea, Monastery_OnEnter, Monastery_OnExit);
 };
@@ -58,6 +60,19 @@ func void Monastery_CreateArea()
 
 Call the setup function once per process. `AM_Clear` is available when scripts
 need to recreate every area after a development-time script reload.
+
+`AM_SetWeather` makes a registered area force full-intensity rain or snow while
+the hero is inside it. The effect fades in and out over three seconds; the
+world's native weather schedule is restored after the fade-out. The effect
+requires an outdoor sky controller.
+Gothic II supports rain (`1`) and snow (`2`); Gothic I only supports rain and
+returns `FALSE` when snow is requested. Set weather to none (`0`) to remove the
+attribute.
+
+When weather-enabled areas overlap, the area with the highest handle (the most
+recently created matching area) takes precedence. Leaving it falls back to the
+next matching weather-enabled area instead of stopping the effect. A rain/snow
+type change fades the old type out before fading the new type in.
 
 A portal-room component is defined by adding one or more room names. It may be
 used alone or combined with polygon points:
@@ -119,6 +134,9 @@ and self-intersecting outlines are not supported. Do not mix `AM_AddPoint` and
   For an X/Y/Z polygon, this is an additional cap on the interpolated ceiling.
 - `AM_ClearHeight(area)` removes the global height bounds. Per-point ceilings
   remain active.
+- `AM_SetWeather(area, weather)` assigns none (`0`), rain (`1`), or snow (`2`).
+  A registered area forces that weather while the hero is inside. Snow is
+  unsupported by Gothic I and returns `FALSE` there.
 - `AM_IsIn(area, x, y, z, world)` performs the same point-in-polygon test as
   `Area.isIn`, including a variable ceiling when present. It tests only the
   polygon component because an arbitrary coordinate has no vob whose BSP

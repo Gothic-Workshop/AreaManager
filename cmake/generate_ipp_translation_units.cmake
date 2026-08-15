@@ -28,6 +28,12 @@ function(generate_ipp_translation_units)
 
         string(TOLOWER "${PlatformSuffix}" platform_suffix_lowercase)
 
+        if(PlatformSuffix STREQUAL "G2" OR PlatformSuffix STREQUAL "G2A")
+            set(GothicSupportsSnow 1)
+        else()
+            set(GothicSupportsSnow 0)
+        endif()
+
         foreach(ipp ${ARG_INPUT})
             # Extract relative src filepath
             string(REPLACE "${CMAKE_CURRENT_SOURCE_DIR}/src" "" filepath "${ipp}")

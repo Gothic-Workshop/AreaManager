@@ -1,5 +1,5 @@
 # Cross-compile 32-bit Windows binaries with mstorsjo/msvc-wine.
-# A CMake cache value (for example from CMakeUserConfigPresets.json) takes
+# A CMake cache value (for example from a user preset) takes
 # precedence over the MSVC_WINE_ROOT environment variable and the default.
 set(_MSVC_WINE_DEFAULT_ROOT "$ENV{HOME}/my_msvc/opt/msvc")
 if(DEFINED ENV{MSVC_WINE_ROOT} AND NOT "$ENV{MSVC_WINE_ROOT}" STREQUAL "")
@@ -11,7 +11,7 @@ set(MSVC_WINE_ROOT "${_MSVC_WINE_DEFAULT_ROOT}" CACHE PATH
 
 if(MSVC_WINE_ROOT STREQUAL "")
     message(FATAL_ERROR
-        "MSVC_WINE_ROOT is empty. Set it in CMakeUserConfigPresets.json, "
+        "MSVC_WINE_ROOT is empty. Set it in a user preset, "
         "as an environment variable, or with -DMSVC_WINE_ROOT=/path/to/msvc.")
 endif()
 
@@ -28,7 +28,7 @@ if(NOT _MSVC_WINE_MSVC_DIRS OR NOT _MSVC_WINE_SDK_DIRS)
     message(FATAL_ERROR
         "Could not locate the MSVC or Windows SDK include directories below "
         "${MSVC_WINE_ROOT}. Set MSVC_WINE_ROOT in "
-        "CMakeUserConfigPresets.json, as an environment variable, or with "
+        "a user preset, as an environment variable, or with "
         "-DMSVC_WINE_ROOT=/path/to/msvc. The selected directory must contain "
         "bin/x86, VC/Tools/MSVC, and Windows Kits/10.")
 endif()

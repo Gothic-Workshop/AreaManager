@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added per-area rain and snow attributes with persistent full-intensity weather,
+  overlap handling, and restoration of the world's native weather schedule on
+  exit. Gothic I supports rain only.
 - Added portal-room areas with support for assigning multiple rooms to one area.
 - Added optional debug rendering for polygon borders.
 - Allowed portal rooms and polygon geometry to be combined in one area.
