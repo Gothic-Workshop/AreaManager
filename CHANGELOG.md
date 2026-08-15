@@ -3,6 +3,10 @@
 ## Unreleased
 
 - Added portal-room areas with support for assigning multiple rooms to one area.
+- Added optional debug rendering for polygon borders.
+- Allowed portal rooms and polygon geometry to be combined in one area.
+- Added concave polygon ceilings with a separately interpolated height at every
+  X/Y/Z vertex.
 
 ## 1.0.0
 

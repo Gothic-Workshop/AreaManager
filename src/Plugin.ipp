@@ -16,6 +16,7 @@ namespace GOTHIC_NAMESPACE
 	namespace AreaManagerPlugin
 	{
 		constexpr DWORD ProcessIntervalMs = 500;
+		constexpr float DebugLineHeightOffset = 20.0F;
 		constexpr int InvalidAreaHandle = 0;
 		constexpr int InvalidFunctionIndex = -1;
 
@@ -49,7 +50,15 @@ namespace GOTHIC_NAMESPACE
 		struct Point
 		{
 			float x;
+			float ceilingY;
 			float z;
+		};
+
+		struct Triangle
+		{
+			std::size_t a;
+			std::size_t b;
+			std::size_t c;
 		};
 
 		class Area
@@ -62,37 +71,29 @@ namespace GOTHIC_NAMESPACE
 
 			bool AddPoint(float x, float z)
 			{
-				if (!portalRooms_.empty())
+				if (!points_.empty() && hasPointCeilings_)
 					return false;
 
-				points_.push_back({ x, z });
+				points_.push_back({ x, 0.0F, z });
+				UpdateBounds(x, z);
+				return true;
+			}
 
-				if (!hasBounds_)
-				{
-					minX_ = maxX_ = x;
-					minZ_ = maxZ_ = z;
-					hasBounds_ = true;
-					return true;
-				}
+			bool AddPoint3D(float x, float y, float z)
+			{
+				if (!points_.empty() && !hasPointCeilings_)
+					return false;
 
-				if (x < minX_)
-					minX_ = x;
-
-				if (x > maxX_)
-					maxX_ = x;
-
-				if (z < minZ_)
-					minZ_ = z;
-
-				if (z > maxZ_)
-					maxZ_ = z;
-
+				hasPointCeilings_ = true;
+				points_.push_back({ x, y, z });
+				UpdateBounds(x, z);
+				ceilingTrianglesDirty_ = true;
 				return true;
 			}
 
 			bool AddPortalRoom(std::string portalRoom)
 			{
-				if (!points_.empty() || portalRoom.empty())
+				if (portalRoom.empty())
 					return false;
 
 				return portalRooms_.insert(std::move(portalRoom)).second;
@@ -138,7 +139,9 @@ namespace GOTHIC_NAMESPACE
 
 			bool IsValid() const
 			{
-				return (points_.size() >= 3 || !portalRooms_.empty()) && !world_.empty();
+				const bool polygonValid = points_.size() >= 3
+					&& (!hasPointCeilings_ || EnsureCeilingTriangles());
+				return (polygonValid || !portalRooms_.empty()) && !world_.empty();
 			}
 
 			bool IsIn(float x, float y, float z, const std::string& world) const
@@ -170,15 +173,57 @@ namespace GOTHIC_NAMESPACE
 					}
 				}
 
-				return isIn;
+				if (!isIn)
+					return false;
+
+				if (hasPointCeilings_)
+				{
+					float ceilingY;
+					if (!GetCeilingHeight(x, z, ceilingY) || y > ceilingY)
+						return false;
+				}
+
+				return true;
 			}
 
 			bool ContainsHero(float x, float y, float z, const std::string& portalRoom) const
 			{
-				if (!portalRooms_.empty())
-					return ContainsHeight(y) && portalRooms_.contains(portalRoom);
+				const bool isInPortalRoom = ContainsHeight(y)
+					&& portalRooms_.contains(portalRoom);
+				return isInPortalRoom || ContainsPosition(x, y, z);
+			}
 
-				return ContainsPosition(x, y, z);
+			bool CanRenderDebug() const
+			{
+				return points_.size() >= 3;
+			}
+
+			void RenderDebug(float height) const
+			{
+				if (!CanRenderDebug() || zlineCache == nullptr)
+					return;
+
+				if (hasMinHeight_ && height < minY_)
+					height = minY_;
+
+				if (hasMaxHeight_ && height > maxY_)
+					height = maxY_;
+
+				const zCOLOR color(255, 64, 64);
+				std::size_t previous = points_.size() - 1;
+
+				for (std::size_t current = 0; current < points_.size(); previous = current++)
+				{
+					const Point& from = points_[previous];
+					const Point& to = points_[current];
+					const float fromHeight = hasPointCeilings_ ? from.ceilingY : height;
+					const float toHeight = hasPointCeilings_ ? to.ceilingY : height;
+					zlineCache->Line3D(
+						zVEC3(from.x, fromHeight, from.z),
+						zVEC3(to.x, toHeight, to.z),
+						color,
+						0);
+				}
 			}
 
 			const std::string& World() const
@@ -198,9 +243,187 @@ namespace GOTHIC_NAMESPACE
 				return true;
 			}
 
+			void UpdateBounds(float x, float z)
+			{
+				if (!hasBounds_)
+				{
+					minX_ = maxX_ = x;
+					minZ_ = maxZ_ = z;
+					hasBounds_ = true;
+					return;
+				}
+
+				if (x < minX_)
+					minX_ = x;
+
+				if (x > maxX_)
+					maxX_ = x;
+
+				if (z < minZ_)
+					minZ_ = z;
+
+				if (z > maxZ_)
+					maxZ_ = z;
+			}
+
+			static double CrossXZ(const Point& a, const Point& b, const Point& c)
+			{
+				return (static_cast<double>(b.x) - a.x) * (static_cast<double>(c.z) - a.z)
+					- (static_cast<double>(b.z) - a.z) * (static_cast<double>(c.x) - a.x);
+			}
+
+			double GeometryEpsilon() const
+			{
+				const double spanX = static_cast<double>(maxX_) - minX_;
+				const double spanZ = static_cast<double>(maxZ_) - minZ_;
+				const double span = std::max(spanX, spanZ);
+				return std::max(1.0, span * span) * 1.0e-10;
+			}
+
+			static bool IsPointInTriangleXZ(
+				const Point& point,
+				const Point& a,
+				const Point& b,
+				const Point& c,
+				double orientation,
+				double epsilon)
+			{
+				return orientation * CrossXZ(a, b, point) >= -epsilon
+					&& orientation * CrossXZ(b, c, point) >= -epsilon
+					&& orientation * CrossXZ(c, a, point) >= -epsilon;
+			}
+
+			bool EnsureCeilingTriangles() const
+			{
+				if (!ceilingTrianglesDirty_)
+					return ceilingTrianglesValid_;
+
+				ceilingTrianglesDirty_ = false;
+				ceilingTrianglesValid_ = false;
+				ceilingTriangles_.clear();
+
+				if (!hasPointCeilings_ || points_.size() < 3)
+					return false;
+
+				std::vector<std::size_t> remaining;
+				remaining.reserve(points_.size());
+
+				for (std::size_t index = 0; index < points_.size(); ++index)
+					remaining.push_back(index);
+
+				const double epsilon = GeometryEpsilon();
+
+				double signedArea = 0.0;
+				for (std::size_t current = 0; current < remaining.size(); ++current)
+				{
+					const Point& from = points_[remaining[current]];
+					const Point& to = points_[remaining[(current + 1) % remaining.size()]];
+					signedArea += static_cast<double>(from.x) * to.z
+						- static_cast<double>(to.x) * from.z;
+				}
+
+				if (std::abs(signedArea) <= epsilon)
+					return false;
+
+				const double orientation = signedArea > 0.0 ? 1.0 : -1.0;
+
+				while (remaining.size() > 3)
+				{
+					bool foundEar = false;
+
+					for (std::size_t current = 0; current < remaining.size(); ++current)
+					{
+						const std::size_t previous = (current + remaining.size() - 1) % remaining.size();
+						const std::size_t next = (current + 1) % remaining.size();
+						const std::size_t a = remaining[previous];
+						const std::size_t b = remaining[current];
+						const std::size_t c = remaining[next];
+
+						if (orientation * CrossXZ(points_[a], points_[b], points_[c]) <= epsilon)
+							continue;
+
+						bool containsVertex = false;
+						for (const std::size_t candidate : remaining)
+						{
+							if (candidate == a || candidate == b || candidate == c)
+								continue;
+
+							if (IsPointInTriangleXZ(
+								points_[candidate], points_[a], points_[b], points_[c],
+								orientation, epsilon))
+							{
+								containsVertex = true;
+								break;
+							}
+						}
+
+						if (containsVertex)
+							continue;
+
+						ceilingTriangles_.push_back({ a, b, c });
+						remaining.erase(remaining.begin() + current);
+						foundEar = true;
+						break;
+					}
+
+					if (!foundEar)
+					{
+						ceilingTriangles_.clear();
+						return false;
+					}
+				}
+
+				ceilingTriangles_.push_back({ remaining[0], remaining[1], remaining[2] });
+				ceilingTrianglesValid_ = true;
+				return true;
+			}
+
+			bool GetCeilingHeight(float x, float z, float& ceilingY) const
+			{
+				if (!EnsureCeilingTriangles())
+					return false;
+
+				constexpr double WeightEpsilon = 1.0e-5;
+				const double geometryEpsilon = GeometryEpsilon();
+
+				for (const Triangle& triangle : ceilingTriangles_)
+				{
+					const Point& a = points_[triangle.a];
+					const Point& b = points_[triangle.b];
+					const Point& c = points_[triangle.c];
+					const double denominator = (static_cast<double>(b.z) - c.z) * (a.x - c.x)
+						+ (static_cast<double>(c.x) - b.x) * (a.z - c.z);
+
+					if (std::abs(denominator) <= geometryEpsilon)
+						continue;
+
+					const double weightA = ((static_cast<double>(b.z) - c.z) * (x - c.x)
+						+ (static_cast<double>(c.x) - b.x) * (z - c.z)) / denominator;
+					const double weightB = ((static_cast<double>(c.z) - a.z) * (x - c.x)
+						+ (static_cast<double>(a.x) - c.x) * (z - c.z)) / denominator;
+					const double weightC = 1.0 - weightA - weightB;
+
+					if (weightA < -WeightEpsilon || weightB < -WeightEpsilon
+						|| weightC < -WeightEpsilon)
+					{
+						continue;
+					}
+
+					ceilingY = static_cast<float>(weightA * a.ceilingY
+						+ weightB * b.ceilingY + weightC * c.ceilingY);
+					return true;
+				}
+
+				return false;
+			}
+
 			std::vector<Point> points_;
+			mutable std::vector<Triangle> ceilingTriangles_;
 			std::unordered_set<std::string> portalRooms_;
 			std::string world_;
+			bool hasPointCeilings_ = false;
+			mutable bool ceilingTrianglesDirty_ = false;
+			mutable bool ceilingTrianglesValid_ = false;
 
 			bool hasMinHeight_ = false;
 			bool hasMaxHeight_ = false;
@@ -255,6 +478,15 @@ namespace GOTHIC_NAMESPACE
 					return false;
 
 				return area->AddPoint(x, z);
+			}
+
+			bool AddPoint3D(int handle, float x, float y, float z)
+			{
+				auto* area = FindArea(handle);
+				if (area == nullptr || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+					return false;
+
+				return area->AddPoint3D(x, y, z);
 			}
 
 			bool AddPortalRoom(int handle, const zSTRING& portalRoom)
@@ -345,6 +577,12 @@ namespace GOTHIC_NAMESPACE
 				return registrations_.contains(handle);
 			}
 
+			bool SetDebug(bool enabled)
+			{
+				debugEnabled_ = enabled;
+				return true;
+			}
+
 			int CurrentCallbackArea() const
 			{
 				return currentCallbackArea_;
@@ -368,6 +606,25 @@ namespace GOTHIC_NAMESPACE
 			{
 				registrations_.clear();
 				areas_.clear();
+				debugEnabled_ = false;
+			}
+
+			void RenderDebug() const
+			{
+				if (!debugEnabled_ || player == nullptr || ogame == nullptr
+					|| ogame->GetWorld() == nullptr || zlineCache == nullptr)
+				{
+					return;
+				}
+
+				const float height = player->GetPositionWorld()[1] + DebugLineHeightOffset;
+
+				for (const auto& entry : areas_)
+				{
+					const Area& area = entry.second;
+					if (area.CanRenderDebug() && IsCurrentWorld(area))
+						area.RenderDebug(height);
+				}
 			}
 
 			void Tick()
@@ -508,6 +765,7 @@ namespace GOTHIC_NAMESPACE
 			int processCallback_ = InvalidFunctionIndex;
 			DWORD lastProcessTime_ = 0;
 			bool timerStarted_ = false;
+			bool debugEnabled_ = false;
 		};
 
 		int __cdecl External_Create()
@@ -527,6 +785,20 @@ namespace GOTHIC_NAMESPACE
 			parser->GetParameter(x);
 			parser->GetParameter(handle);
 			parser->SetReturn(static_cast<int>(AreaManager::Instance().AddPoint(handle, x, z)));
+			return 0;
+		}
+
+		int __cdecl External_AddPoint3D()
+		{
+			float z;
+			float y;
+			float x;
+			int handle;
+			parser->GetParameter(z);
+			parser->GetParameter(y);
+			parser->GetParameter(x);
+			parser->GetParameter(handle);
+			parser->SetReturn(static_cast<int>(AreaManager::Instance().AddPoint3D(handle, x, y, z)));
 			return 0;
 		}
 
@@ -640,6 +912,14 @@ namespace GOTHIC_NAMESPACE
 			return 0;
 		}
 
+		int __cdecl External_SetDebug()
+		{
+			int enabled;
+			parser->GetParameter(enabled);
+			parser->SetReturn(static_cast<int>(AreaManager::Instance().SetDebug(enabled != 0)));
+			return 0;
+		}
+
 		int __cdecl External_GetCurrentArea()
 		{
 			parser->SetReturn(AreaManager::Instance().CurrentCallbackArea());
@@ -672,6 +952,9 @@ namespace GOTHIC_NAMESPACE
 				zPAR_TYPE_INT, zPAR_TYPE_STRING, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_ADDPOINT", External_AddPoint,
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_FLOAT, zPAR_TYPE_FLOAT, zPAR_TYPE_VOID);
+			scriptParser->DefineExternal("AM_ADDPOINT3D", External_AddPoint3D,
+				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_FLOAT, zPAR_TYPE_FLOAT,
+				zPAR_TYPE_FLOAT, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_ADDPORTALROOM", External_AddPortalRoom,
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_STRING, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_SETHEIGHT", External_SetHeight,
@@ -695,6 +978,8 @@ namespace GOTHIC_NAMESPACE
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_ISREGISTERED", External_IsRegistered,
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_VOID);
+			scriptParser->DefineExternal("AM_SETDEBUG", External_SetDebug,
+				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_GETCURRENTAREA", External_GetCurrentArea,
 				zPAR_TYPE_INT, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_SETPROCESSCALLBACK", External_SetProcessCallback,
@@ -715,6 +1000,7 @@ namespace GOTHIC_NAMESPACE
 	void __fastcall oCGame_Render_AreaManager(oCGame* self, void* vtable)
 	{
 		Hook_oCGame_Render_AreaManager(self, vtable);
+		AreaManagerPlugin::AreaManager::Instance().RenderDebug();
 		AreaManagerPlugin::AreaManager::Instance().Tick();
 	}
 
