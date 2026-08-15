@@ -8,7 +8,7 @@ hero.
 The manager checks the hero every 500 ms, matching the Squirrel implementation.
 Polygons can use X/Z coordinates with flat height bounds, or X/Y/Z vertices
 whose Y values form a variable ceiling. Global height bounds can also restrict
-portal-room and mixed areas.
+the polygon component of a mixed area; they do not restrict its portal rooms.
 World names are compared case-insensitively and `/` is normalized to `\`.
 Portal-room names are also compared case-insensitively. One area may contain
 multiple portal rooms.
@@ -79,7 +79,8 @@ func void Monastery_CreateMixedArea()
 
 Use the BSP sector names defined by the world portals. In a mixed area, portal
 rooms and the polygon are combined as a union: either component can make the
-hero enter the area.
+hero enter the area. Polygon height limits do not apply when the hero matches
+one of the assigned portal rooms.
 
 For a polygon with a variable ceiling, use X/Y/Z points consistently:
 
@@ -111,10 +112,11 @@ and self-intersecting outlines are not supported. Do not mix `AM_AddPoint` and
 - `AM_AddPortalRoom(area, portalRoom)` adds a BSP portal-room name. Repeat it
   to make the area the union of multiple rooms; polygon points may be added to
   the same area.
-- `AM_SetHeight(area, minY, maxY)` enables the optional global height interval.
-- `AM_SetMinHeight(area, minY)` enables only the global lower height bound.
-- `AM_SetMaxHeight(area, maxY)` enables only the global upper height bound. For
-  an X/Y/Z polygon, this is an additional cap on the interpolated ceiling.
+- `AM_SetHeight(area, minY, maxY)` enables the polygon's optional global height
+  interval.
+- `AM_SetMinHeight(area, minY)` enables only the polygon's global lower bound.
+- `AM_SetMaxHeight(area, maxY)` enables only the polygon's global upper bound.
+  For an X/Y/Z polygon, this is an additional cap on the interpolated ceiling.
 - `AM_ClearHeight(area)` removes the global height bounds. Per-point ceilings
   remain active.
 - `AM_IsIn(area, x, y, z, world)` performs the same point-in-polygon test as

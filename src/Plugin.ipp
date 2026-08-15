@@ -188,8 +188,7 @@ namespace GOTHIC_NAMESPACE
 
 			bool ContainsHero(float x, float y, float z, const std::string& portalRoom) const
 			{
-				const bool isInPortalRoom = ContainsHeight(y)
-					&& portalRooms_.contains(portalRoom);
+				const bool isInPortalRoom = portalRooms_.contains(portalRoom);
 				return isInPortalRoom || ContainsPosition(x, y, z);
 			}
 
@@ -276,8 +275,9 @@ namespace GOTHIC_NAMESPACE
 			{
 				const double spanX = static_cast<double>(maxX_) - minX_;
 				const double spanZ = static_cast<double>(maxZ_) - minZ_;
-				const double span = std::max(spanX, spanZ);
-				return std::max(1.0, span * span) * 1.0e-10;
+				const double span = spanX > spanZ ? spanX : spanZ;
+				const double squaredSpan = span * span;
+				return (squaredSpan > 1.0 ? squaredSpan : 1.0) * 1.0e-10;
 			}
 
 			static bool IsPointInTriangleXZ(

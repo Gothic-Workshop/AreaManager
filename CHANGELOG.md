@@ -7,6 +7,8 @@
 - Allowed portal rooms and polygon geometry to be combined in one area.
 - Added concave polygon ceilings with a separately interpolated height at every
   X/Y/Z vertex.
+- Scoped height bounds to polygon geometry so they do not suppress portal-room
+  membership in mixed areas.
 
 ## 1.0.0
 
