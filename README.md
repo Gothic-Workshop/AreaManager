@@ -74,6 +74,41 @@ recently created matching area) takes precedence. Leaving it falls back to the
 next matching weather-enabled area instead of stopping the effect. A rain/snow
 type change fades the old type out before fading the new type in.
 
+`AM_SetMusic` assigns explicit `Music.dat` instance names in day/night pairs for
+the hero's normal, threatened, and fighting states:
+
+```d
+AM_SetMusic(MonasteryArea,
+	"MOI_DAY_STD", "MOI_NGT_STD",
+	"MOI_DAY_THR", "MOI_NGT_THR",
+	"MOI_DAY_FGT", "MOI_NGT_FGT");
+```
+
+Names are case-insensitive and are used exactly as supplied; the plugin does not
+append suffixes. They refer to `C_MUSICTHEME` instances in the music scripts,
+not filenames or instance indices in `Gothic.dat`. Both standard themes must be
+nonempty. An empty or unavailable threat/fight theme falls back to the standard
+theme for the same time of day. If that standard theme cannot be loaded, native
+world music takes over.
+
+Music selection updates automatically on each 500 ms manager tick, including
+when the hero changes state without leaving the area. The plugin uses Gothic's
+hero status and day/night selection; no Daedalus process callback is needed.
+An unchanged theme keeps playing without being restarted, and transitions use
+the music instance's settings. Music-enabled areas must be registered with
+`AM_Add`, just like weather-enabled areas.
+
+When music-enabled areas overlap, the highest handle takes precedence. Leaving,
+removing, destroying, or clearing its music falls back to the next matching
+music-enabled area, then to the current native world-zone theme. Native zone
+selection continues while an area supplies music, so the restored theme follows
+zone and hero-state changes made inside the area. Automatic music honors the
+engine's music-disabled and autochange settings, including temporary global
+songs. Playback and stop requests are intercepted on the active music backend,
+including replacements such as zBassMusic. A replacement backend must permit
+engine-driven playback; with zBassMusic, call
+`BassMusic_SetFullScriptControl(FALSE)` instead of enabling manual script control.
+
 A portal-room component is defined by adding one or more room names. It may be
 used alone or combined with polygon points:
 
@@ -137,6 +172,12 @@ and self-intersecting outlines are not supported. Do not mix `AM_AddPoint` and
 - `AM_SetWeather(area, weather)` assigns none (`0`), rain (`1`), or snow (`2`).
   A registered area forces that weather while the hero is inside. Snow is
   unsupported by Gothic I and returns `FALSE` there.
+- `AM_SetMusic(area, dayStandard, nightStandard, dayThreat, nightThreat, dayFight,
+  nightFight)` assigns explicit music instance names for all six combinations.
+  Both standard names are required; empty threat/fight names use the standard
+  theme for that time of day. The registered area selects music automatically.
+- `AM_ClearMusic(area)` removes the music assignment and restores the next
+  matching area or native world music when necessary.
 - `AM_IsIn(area, x, y, z, world)` performs the same point-in-polygon test as
   `Area.isIn`, including a variable ceiling when present. It tests only the
   polygon component because an arbitrary coordinate has no vob whose BSP

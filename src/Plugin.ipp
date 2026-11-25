@@ -14,6 +14,7 @@
 namespace GOTHIC_NAMESPACE
 {
 	void EnsureAreaManagerWeatherHook();
+	void EnsureAreaManagerMusicHooks();
 
 	namespace AreaManagerPlugin
 	{
@@ -24,6 +25,7 @@ namespace GOTHIC_NAMESPACE
 		constexpr float FullWeatherWeight = 1.0F;
 		constexpr int InvalidAreaHandle = 0;
 		constexpr int InvalidFunctionIndex = -1;
+		int nativeMusicUpdateDepth = 0;
 
 		enum class Weather
 		{
@@ -47,7 +49,7 @@ namespace GOTHIC_NAMESPACE
 			return normalized;
 		}
 
-		std::string NormalizePortalRoomName(const char* value)
+		std::string NormalizeName(const char* value)
 		{
 			std::string normalized = value != nullptr ? value : "";
 
@@ -71,6 +73,44 @@ namespace GOTHIC_NAMESPACE
 			std::size_t a;
 			std::size_t b;
 			std::size_t c;
+		};
+
+		struct MusicThemes
+		{
+			std::string dayStandard;
+			std::string nightStandard;
+			std::string dayThreat;
+			std::string nightThreat;
+			std::string dayFight;
+			std::string nightFight;
+
+			bool IsEnabled() const
+			{
+				return !dayStandard.empty() && !nightStandard.empty();
+			}
+
+			const std::string& Standard(bool daytime) const
+			{
+				return daytime ? dayStandard : nightStandard;
+			}
+
+			const std::string& Select(bool daytime, oHEROSTATUS status) const
+			{
+				if (status == oHERO_STATUS_FGT)
+				{
+					const auto& theme = daytime ? dayFight : nightFight;
+					if (!theme.empty())
+						return theme;
+				}
+				else if (status == oHERO_STATUS_THR)
+				{
+					const auto& theme = daytime ? dayThreat : nightThreat;
+					if (!theme.empty())
+						return theme;
+				}
+
+				return Standard(daytime);
+			}
 		};
 
 		class Area
@@ -152,6 +192,16 @@ namespace GOTHIC_NAMESPACE
 			void SetWeather(Weather weather)
 			{
 				weather_ = weather;
+			}
+
+			void SetMusic(MusicThemes music)
+			{
+				music_ = std::move(music);
+			}
+
+			const MusicThemes& GetMusic() const
+			{
+				return music_;
 			}
 
 			bool IsValid() const
@@ -444,6 +494,7 @@ namespace GOTHIC_NAMESPACE
 			std::unordered_set<std::string> portalRooms_;
 			std::string world_;
 			Weather weather_ = Weather::None;
+			MusicThemes music_;
 			bool hasPointCeilings_ = false;
 			mutable bool ceilingTrianglesDirty_ = false;
 			mutable bool ceilingTrianglesValid_ = false;
@@ -516,7 +567,7 @@ namespace GOTHIC_NAMESPACE
 			{
 				auto* area = FindArea(handle);
 				return area != nullptr
-					&& area->AddPortalRoom(NormalizePortalRoomName(portalRoom.ToChar()));
+					&& area->AddPortalRoom(NormalizeName(portalRoom.ToChar()));
 			}
 
 			bool SetHeight(int handle, float minY, float maxY)
@@ -570,6 +621,29 @@ namespace GOTHIC_NAMESPACE
 				return true;
 			}
 
+			bool SetMusic(int handle, MusicThemes music)
+			{
+				auto* area = FindArea(handle);
+				if (area == nullptr || !music.IsEnabled())
+					return false;
+
+				EnsureAreaManagerMusicHooks();
+				area->SetMusic(std::move(music));
+				UpdateMusicOverride();
+				return true;
+			}
+
+			bool ClearMusic(int handle)
+			{
+				auto* area = FindArea(handle);
+				if (area == nullptr)
+					return false;
+
+				area->SetMusic({});
+				UpdateMusicOverride();
+				return true;
+			}
+
 			bool IsIn(int handle, float x, float y, float z, const zSTRING& world) const
 			{
 				const auto* area = FindArea(handle);
@@ -611,7 +685,10 @@ namespace GOTHIC_NAMESPACE
 			{
 				const bool removed = registrations_.erase(handle) != 0;
 				if (removed)
+				{
 					UpdateWeatherOverride();
+					UpdateMusicOverride();
+				}
 
 				return removed;
 			}
@@ -621,7 +698,10 @@ namespace GOTHIC_NAMESPACE
 				registrations_.erase(handle);
 				const bool destroyed = areas_.erase(handle) != 0;
 				if (destroyed)
+				{
 					UpdateWeatherOverride();
+					UpdateMusicOverride();
+				}
 
 				return destroyed;
 			}
@@ -662,6 +742,7 @@ namespace GOTHIC_NAMESPACE
 				areas_.clear();
 				debugEnabled_ = false;
 				ResetWeatherOverride();
+				RestoreNativeMusic();
 			}
 
 			void RenderDebug() const
@@ -698,6 +779,38 @@ namespace GOTHIC_NAMESPACE
 
 				lastProcessTime_ = now;
 				Process();
+			}
+
+			bool CaptureNativeMusicTheme(const zSTRING& theme)
+			{
+				if (nativeMusicUpdateDepth == 0)
+				{
+					lastMusicTheme_.clear();
+					return false;
+				}
+
+				if (player == nullptr || ogame == nullptr || musicWorld_ != ogame->GetWorld()
+					|| musicSystem_ != zmusic)
+				{
+					ForgetMusicOverride();
+					return false;
+				}
+
+				if (!musicOverrideActive_)
+				{
+					// A native request supersedes any restoration deferred by a global song.
+					ForgetMusicOverride();
+					return false;
+				}
+
+				const std::string name = NormalizeName(theme.ToChar());
+				// Missing native variants must still fail so Gothic can try its fallbacks.
+				if (!name.empty() && !IsMusicInstance(name))
+					return false;
+
+				// Keep native selection running so exit resumes the current zone and state.
+				nativeMusicTheme_ = name;
+				return true;
 			}
 
 			bool IsWeatherOverrideActive() const
@@ -815,6 +928,139 @@ namespace GOTHIC_NAMESPACE
 
 		private:
 			AreaManager() = default;
+
+			static bool CanChangeMusic()
+			{
+				return zmusic != nullptr && !zCMusicSystem::s_musicSystemDisabled
+					&& zCZoneMusic::s_autochange;
+			}
+
+			void UpdateMusicOverride()
+			{
+				if (player == nullptr || ogame == nullptr || ogame->GetWorld() == nullptr)
+				{
+					ForgetMusicOverride();
+					return;
+				}
+
+				if (musicWorld_ != nullptr && musicWorld_ != ogame->GetWorld())
+					ForgetMusicOverride();
+				if (musicSystem_ != nullptr && musicSystem_ != zmusic)
+					ForgetMusicOverride();
+
+				int selectedHandle = InvalidAreaHandle;
+				const MusicThemes* selectedMusic = nullptr;
+				for (const auto& [handle, registration] : registrations_)
+				{
+					if (!registration.heroInside || handle <= selectedHandle)
+						continue;
+
+					const auto* area = FindArea(handle);
+					if (area == nullptr || !area->GetMusic().IsEnabled() || !IsCurrentWorld(*area))
+						continue;
+
+					selectedHandle = handle;
+					selectedMusic = &area->GetMusic();
+				}
+
+				if (selectedMusic == nullptr)
+				{
+					RestoreNativeMusic();
+					return;
+				}
+
+				if (!CanChangeMusic())
+				{
+					lastMusicTheme_.clear();
+					return;
+				}
+
+				EnsureAreaManagerMusicHooks();
+
+				const bool daytime = oCZoneMusic::IsDaytime() != 0;
+				const std::string& selectedTheme = selectedMusic->Select(daytime, ogame->GetHeroStatus());
+				if (musicWorld_ == nullptr)
+				{
+					musicWorld_ = ogame->GetWorld();
+					musicSystem_ = zmusic;
+					const auto* nativeTheme = zmusic->GetActiveTheme();
+					nativeMusicTheme_ = nativeTheme != nullptr
+						? NormalizeName(nativeTheme->name.ToChar()) : std::string();
+				}
+
+				musicOverrideActive_ = PlayMusicTheme(selectedTheme);
+				if (!musicOverrideActive_ && selectedTheme != selectedMusic->Standard(daytime))
+					musicOverrideActive_ = PlayMusicTheme(selectedMusic->Standard(daytime));
+
+				if (!musicOverrideActive_)
+					RestoreNativeMusic();
+			}
+
+			bool PlayMusicTheme(const std::string& name)
+			{
+				if (!IsMusicInstance(name))
+					return false;
+
+				if (lastMusicTheme_ == name)
+					return true;
+
+				// Named playback keeps theme allocation and lifetime inside the engine.
+				int played = FALSE;
+				zmusic->PlayThemeByScript(zSTRING(name.c_str()), FALSE, &played);
+				if (!played)
+				{
+					// Some backends leave the result unset when this theme is already active.
+					const auto* activeTheme = zmusic->GetActiveTheme();
+					if (activeTheme == nullptr || NormalizeName(activeTheme->name.ToChar()) != name)
+						return false;
+				}
+
+				lastMusicTheme_ = name;
+				return true;
+			}
+
+			static bool IsMusicInstance(const std::string& name)
+			{
+				if (parserMusic == nullptr || name.empty())
+					return false;
+
+				const auto* symbol = parserMusic->GetSymbol(zSTRING(name.c_str()));
+				return symbol != nullptr && symbol->type == zPAR_TYPE_INSTANCE;
+			}
+
+			void RestoreNativeMusic()
+			{
+				musicOverrideActive_ = false;
+				if (musicWorld_ == nullptr)
+					return;
+
+				if (player == nullptr || ogame == nullptr || musicWorld_ != ogame->GetWorld()
+					|| musicSystem_ != zmusic)
+				{
+					ForgetMusicOverride();
+					return;
+				}
+
+				// Global songs can temporarily suspend automatic world music.
+				if (!CanChangeMusic())
+					return;
+
+				const std::string nativeTheme = std::move(nativeMusicTheme_);
+				ForgetMusicOverride();
+				if (nativeTheme.empty())
+					zmusic->Stop();
+				else if (!PlayMusicTheme(nativeTheme))
+					zmusic->Stop();
+			}
+
+			void ForgetMusicOverride()
+			{
+				musicWorld_ = nullptr;
+				musicSystem_ = nullptr;
+				musicOverrideActive_ = false;
+				nativeMusicTheme_.clear();
+				lastMusicTheme_.clear();
+			}
 
 			static zCSkyControler_Outdoor* GetOutdoorSky()
 			{
@@ -1030,7 +1276,7 @@ namespace GOTHIC_NAMESPACE
 					return {};
 
 				const zSTRING* portalRoom = player->GetSectorNameVobIsIn();
-				return NormalizePortalRoomName(portalRoom != nullptr ? portalRoom->ToChar() : nullptr);
+				return NormalizeName(portalRoom != nullptr ? portalRoom->ToChar() : nullptr);
 			}
 
 			void Process()
@@ -1038,6 +1284,7 @@ namespace GOTHIC_NAMESPACE
 				if (player == nullptr || ogame == nullptr || ogame->GetWorld() == nullptr)
 				{
 					ResetWeatherOverride();
+					ForgetMusicOverride();
 					return;
 				}
 
@@ -1071,6 +1318,7 @@ namespace GOTHIC_NAMESPACE
 					Dispatch(transition);
 
 				DispatchProcessCallback();
+				UpdateMusicOverride();
 			}
 
 			void Dispatch(const Transition& transition)
@@ -1109,6 +1357,11 @@ namespace GOTHIC_NAMESPACE
 			int nextHandle_ = 1;
 			int currentCallbackArea_ = InvalidAreaHandle;
 			int processCallback_ = InvalidFunctionIndex;
+			zCWorld* musicWorld_ = nullptr;
+			zCMusicSystem* musicSystem_ = nullptr;
+			bool musicOverrideActive_ = false;
+			std::string nativeMusicTheme_;
+			std::string lastMusicTheme_;
 			Weather activeWeather_ = Weather::None;
 			Weather desiredWeather_ = Weather::None;
 			float weatherWeight_ = 0.0F;
@@ -1213,6 +1466,38 @@ namespace GOTHIC_NAMESPACE
 			parser->GetParameter(minY);
 			parser->GetParameter(handle);
 			parser->SetReturn(static_cast<int>(AreaManager::Instance().SetMinHeight(handle, minY)));
+			return 0;
+		}
+
+		int __cdecl External_SetMusic()
+		{
+			zSTRING nightFight;
+			zSTRING dayFight;
+			zSTRING nightThreat;
+			zSTRING dayThreat;
+			zSTRING nightStandard;
+			zSTRING dayStandard;
+			int handle;
+			parser->GetParameter(nightFight);
+			parser->GetParameter(dayFight);
+			parser->GetParameter(nightThreat);
+			parser->GetParameter(dayThreat);
+			parser->GetParameter(nightStandard);
+			parser->GetParameter(dayStandard);
+			parser->GetParameter(handle);
+			parser->SetReturn(static_cast<int>(AreaManager::Instance().SetMusic(handle, {
+				NormalizeName(dayStandard.ToChar()), NormalizeName(nightStandard.ToChar()),
+				NormalizeName(dayThreat.ToChar()), NormalizeName(nightThreat.ToChar()),
+				NormalizeName(dayFight.ToChar()), NormalizeName(nightFight.ToChar())
+			})));
+			return 0;
+		}
+
+		int __cdecl External_ClearMusic()
+		{
+			int handle;
+			parser->GetParameter(handle);
+			parser->SetReturn(static_cast<int>(AreaManager::Instance().ClearMusic(handle)));
 			return 0;
 		}
 
@@ -1341,6 +1626,11 @@ namespace GOTHIC_NAMESPACE
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_SETWEATHER", External_SetWeather,
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_VOID);
+			scriptParser->DefineExternal("AM_SETMUSIC", External_SetMusic,
+				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_STRING, zPAR_TYPE_STRING,
+				zPAR_TYPE_STRING, zPAR_TYPE_STRING, zPAR_TYPE_STRING, zPAR_TYPE_STRING, zPAR_TYPE_VOID);
+			scriptParser->DefineExternal("AM_CLEARMUSIC", External_ClearMusic,
+				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_VOID);
 			scriptParser->DefineExternal("AM_ISIN", External_IsIn,
 				zPAR_TYPE_INT, zPAR_TYPE_INT, zPAR_TYPE_FLOAT, zPAR_TYPE_FLOAT,
 				zPAR_TYPE_FLOAT, zPAR_TYPE_STRING, zPAR_TYPE_VOID);
@@ -1434,6 +1724,106 @@ namespace GOTHIC_NAMESPACE
 
 		if (!manager.ProcessWeatherEffect(self) && !originalCalled)
 			GetAreaManagerWeatherHook()(self, vtable);
+	}
+
+	void __fastcall oCZoneMusic_ProcessZoneList_AreaManager(
+		oCZoneMusic* self, void* vtable,
+		zCArraySort<zCZone*> const& zones, zCArraySort<zCZone*> const& deactivatedZones, zCWorld* world);
+	void __fastcall zCMusicSystem_PlayThemeByScript_AreaManager(
+		zCMusicSystem* self, void* vtable, zSTRING const& theme, int manipulate, int* done);
+	void __fastcall zCMusicSystem_Stop_AreaManager(zCMusicSystem* self, void* vtable);
+
+	constexpr DWORD MusicZoneProcessAddress = ENGINE == Engine_G1
+		? 0x0070AE80
+		: ENGINE == Engine_G1A
+			? 0x00745D40
+			: ENGINE == Engine_G2
+				? 0x00754FC0
+				: 0x00640560;
+
+	// These slots follow zCMusicSystem's virtual declarations in all four SDKs.
+	constexpr std::size_t MusicPlayThemeByScriptSlot = 1;
+	constexpr std::size_t MusicStopSlot = 17;
+
+	void* MusicVirtualFunction(zCMusicSystem* system, std::size_t slot)
+	{
+		return (*reinterpret_cast<void***>(system))[slot];
+	}
+
+	auto& GetAreaManagerMusicZoneHook()
+	{
+		static auto hook = Union::CreateHook(
+			reinterpret_cast<void*>(MusicZoneProcessAddress),
+			&oCZoneMusic_ProcessZoneList_AreaManager,
+			Union::HookType::Hook_Detours);
+		return hook;
+	}
+
+	auto& GetAreaManagerMusicPlaybackHooks()
+	{
+		using Callback = decltype(&zCMusicSystem_PlayThemeByScript_AreaManager);
+		static std::unordered_map<void*, Union::Hook<Callback>> hooks;
+		return hooks;
+	}
+
+	auto& GetAreaManagerMusicStopHooks()
+	{
+		using Callback = decltype(&zCMusicSystem_Stop_AreaManager);
+		static std::unordered_map<void*, Union::Hook<Callback>> hooks;
+		return hooks;
+	}
+
+	void EnsureAreaManagerMusicHooks()
+	{
+		(void)GetAreaManagerMusicZoneHook();
+		if (zmusic == nullptr)
+			return;
+
+		// Hook the active backend, including replacements such as zBassMusic.
+		void* playback = MusicVirtualFunction(zmusic, MusicPlayThemeByScriptSlot);
+		auto& playbackHooks = GetAreaManagerMusicPlaybackHooks();
+		if (!playbackHooks.contains(playback))
+			playbackHooks.emplace(playback, Union::CreateHook(playback,
+				&zCMusicSystem_PlayThemeByScript_AreaManager, Union::HookType::Hook_Detours));
+
+		void* stop = MusicVirtualFunction(zmusic, MusicStopSlot);
+		auto& stopHooks = GetAreaManagerMusicStopHooks();
+		if (!stopHooks.contains(stop))
+			stopHooks.emplace(stop, Union::CreateHook(stop,
+				&zCMusicSystem_Stop_AreaManager, Union::HookType::Hook_Detours));
+	}
+
+	void __fastcall oCZoneMusic_ProcessZoneList_AreaManager(
+		oCZoneMusic* self, void* vtable,
+		zCArraySort<zCZone*> const& zones, zCArraySort<zCZone*> const& deactivatedZones, zCWorld* world)
+	{
+		struct NativeMusicUpdateScope
+		{
+			NativeMusicUpdateScope() { ++AreaManagerPlugin::nativeMusicUpdateDepth; }
+			~NativeMusicUpdateScope() { --AreaManagerPlugin::nativeMusicUpdateDepth; }
+		} scope;
+
+		GetAreaManagerMusicZoneHook()(self, vtable, zones, deactivatedZones, world);
+	}
+
+	void __fastcall zCMusicSystem_PlayThemeByScript_AreaManager(
+		zCMusicSystem* self, void* vtable, zSTRING const& theme, int manipulate, int* done)
+	{
+		if (AreaManagerPlugin::AreaManager::Instance().CaptureNativeMusicTheme(theme))
+		{
+			if (done != nullptr)
+				*done = TRUE;
+			return;
+		}
+
+		GetAreaManagerMusicPlaybackHooks().at(MusicVirtualFunction(self, MusicPlayThemeByScriptSlot))(
+			self, vtable, theme, manipulate, done);
+	}
+
+	void __fastcall zCMusicSystem_Stop_AreaManager(zCMusicSystem* self, void* vtable)
+	{
+		if (!AreaManagerPlugin::AreaManager::Instance().CaptureNativeMusicTheme(zSTRING()))
+			GetAreaManagerMusicStopHooks().at(MusicVirtualFunction(self, MusicStopSlot))(self, vtable);
 	}
 
 	void __fastcall oCGame_DefineExternals_AreaManager(oCGame* self, void* vtable, zCParser* scriptParser);

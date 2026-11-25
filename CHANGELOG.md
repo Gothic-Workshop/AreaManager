@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added per-area music with explicit day/night themes for normal, threatened,
+  and fighting hero states, automatic selection, overlap handling, and native
+  world-music restoration through the active music backend, including zBassMusic.
 - Added per-area rain and snow attributes with persistent full-intensity weather,
   overlap handling, and restoration of the world's native weather schedule on
   exit. Gothic I supports rain only.
