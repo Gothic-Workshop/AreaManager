@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added automatic random backgrounds for savegame loading screens using
+  sequential `LOADING_RANDOM_01.TGA`, `LOADING_RANDOM_02.TGA`, ... resources.
 - Added per-area rain and snow attributes with persistent full-intensity weather,
   overlap handling, and restoration of the world's native weather schedule on
   exit. Gothic I supports rain only.

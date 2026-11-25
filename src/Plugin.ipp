@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -24,6 +25,8 @@ namespace GOTHIC_NAMESPACE
 		constexpr float FullWeatherWeight = 1.0F;
 		constexpr int InvalidAreaHandle = 0;
 		constexpr int InvalidFunctionIndex = -1;
+		constexpr const char* RandomLoadingScreenPrefix = "LOADING_RANDOM_";
+		constexpr const char* RandomLoadingScreenExtension = ".TGA";
 
 		enum class Weather
 		{
@@ -58,6 +61,130 @@ namespace GOTHIC_NAMESPACE
 
 			return normalized;
 		}
+
+		class RandomLoadingScreenManager
+		{
+		public:
+			static RandomLoadingScreenManager& Instance()
+			{
+				static RandomLoadingScreenManager instance;
+				return instance;
+			}
+
+			void BeginSavegameLoad()
+			{
+				if (savegameLoadDepth_++ == 0)
+				{
+					selectionAttemptedThisLoad_ = false;
+					selectedScreen_.clear();
+				}
+			}
+
+			void EndSavegameLoad()
+			{
+				if (savegameLoadDepth_ > 0)
+					--savegameLoadDepth_;
+			}
+
+			void TryApply(zCView* view)
+			{
+				if (savegameLoadDepth_ == 0 || view == nullptr)
+				{
+					return;
+				}
+
+				if (!selectedScreen_.empty())
+				{
+					ApplyTexture(view, selectedScreen_);
+					return;
+				}
+
+				if (selectionAttemptedThisLoad_)
+					return;
+
+				selectionAttemptedThisLoad_ = true;
+				DiscoverScreens();
+				auto screens = availableScreens_;
+				if (screens.empty())
+					return;
+
+				std::shuffle(screens.begin(), screens.end(), randomGenerator_);
+				if (screens.size() > 1 && !lastScreen_.empty())
+				{
+					const auto previous = std::find(screens.begin(), screens.end(), lastScreen_);
+					if (previous != screens.end())
+						std::iter_swap(previous, screens.end() - 1);
+				}
+
+				for (const std::string& screen : screens)
+				{
+					if (!ApplyTexture(view, screen))
+						continue;
+
+					selectedScreen_ = screen;
+					lastScreen_ = screen;
+					return;
+				}
+			}
+
+		private:
+			void DiscoverScreens()
+			{
+				if (screensDiscovered_)
+					return;
+
+				screensDiscovered_ = true;
+				for (unsigned int index = 1; index != 0; ++index)
+				{
+					std::string number = std::to_string(index);
+					if (number.size() < 2)
+						number.insert(number.begin(), 2 - number.size(), '0');
+
+					const std::string screen = RandomLoadingScreenPrefix + number
+						+ RandomLoadingScreenExtension;
+					zSTRING textureName(screen.c_str());
+					zCTexture* texture = zCTexture::Load(textureName, TRUE);
+					if (texture == nullptr)
+						break;
+
+					texture->Release();
+					availableScreens_.push_back(screen);
+				}
+			}
+
+			static bool ApplyTexture(zCView* view, const std::string& screen)
+			{
+				zSTRING textureName(screen.c_str());
+				zCTexture* texture = zCTexture::Load(textureName, TRUE);
+				if (texture == nullptr)
+					return false;
+
+				view->InsertBack(texture);
+				texture->Release();
+				return true;
+			}
+
+			RandomLoadingScreenManager()
+			{
+				LARGE_INTEGER performanceCounter;
+				QueryPerformanceCounter(&performanceCounter);
+				std::seed_seq seed{
+					static_cast<unsigned int>(performanceCounter.LowPart),
+					static_cast<unsigned int>(performanceCounter.HighPart),
+					static_cast<unsigned int>(GetTickCount()),
+					static_cast<unsigned int>(GetCurrentProcessId())
+				};
+				randomGenerator_.seed(seed);
+			}
+
+			std::mt19937 randomGenerator_;
+			std::vector<std::string> availableScreens_;
+			std::string lastScreen_;
+			std::string selectedScreen_;
+			unsigned int savegameLoadDepth_ = 0;
+			bool screensDiscovered_ = false;
+			bool selectionAttemptedThisLoad_ = false;
+		};
 
 		struct Point
 		{
@@ -1365,6 +1492,66 @@ namespace GOTHIC_NAMESPACE
 			scriptParser->DefineExternal("AM_CLEAR", External_Clear,
 				zPAR_TYPE_VOID, zPAR_TYPE_VOID);
 		}
+	}
+
+	void __fastcall oCGame_LoadSavegame_AreaManager(
+		oCGame* self,
+		void* vtable,
+		int slot,
+		int loadMode);
+	constexpr DWORD LoadSavegameAddress = ENGINE == Engine_G1
+		? 0x0063C2A0
+		: ENGINE == Engine_G1A
+			? 0x00662D60
+			: ENGINE == Engine_G2
+				? 0x00669BA0
+				: 0x006C67D0;
+
+	auto Hook_oCGame_LoadSavegame_AreaManager = Union::CreateHook(
+		reinterpret_cast<void*>(LoadSavegameAddress),
+		&oCGame_LoadSavegame_AreaManager,
+		Union::HookType::Hook_Detours);
+
+	void __fastcall oCGame_LoadSavegame_AreaManager(
+		oCGame* self,
+		void* vtable,
+		int slot,
+		int loadMode)
+	{
+		auto& loadingScreens = AreaManagerPlugin::RandomLoadingScreenManager::Instance();
+		loadingScreens.BeginSavegameLoad();
+		Hook_oCGame_LoadSavegame_AreaManager(self, vtable, slot, loadMode);
+		loadingScreens.EndSavegameLoad();
+	}
+
+	void __fastcall zCView_InsertItem_AreaManager(
+		zCView* self,
+		void* vtable,
+		zCView* item,
+		int stayOnTop);
+	constexpr DWORD ViewInsertItemAddress = ENGINE == Engine_G1
+		? 0x00701EA0
+		: ENGINE == Engine_G1A
+			? 0x0073C660
+			: ENGINE == Engine_G2
+				? 0x0074BFD0
+				: 0x007ABAD0;
+
+	auto Hook_zCView_InsertItem_AreaManager = Union::CreateHook(
+		reinterpret_cast<void*>(ViewInsertItemAddress),
+		&zCView_InsertItem_AreaManager,
+		Union::HookType::Hook_Detours);
+
+	void __fastcall zCView_InsertItem_AreaManager(
+		zCView* self,
+		void* vtable,
+		zCView* item,
+		int stayOnTop)
+	{
+		Hook_zCView_InsertItem_AreaManager(self, vtable, item, stayOnTop);
+
+		if (ogame != nullptr && self == ogame->load_screen)
+			AreaManagerPlugin::RandomLoadingScreenManager::Instance().TryApply(self);
 	}
 
 	void __fastcall oCGame_Render_AreaManager(oCGame* self, void* vtable);

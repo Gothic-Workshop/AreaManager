@@ -13,6 +13,20 @@ World names are compared case-insensitively and `/` is normalized to `\`.
 Portal-room names are also compared case-insensitively. One area may contain
 multiple portal rooms.
 
+## Random savegame loading screens
+
+The plugin automatically replaces the background shown while loading a
+savegame when sequentially named textures are available. New-game and
+level-transition screens are left unchanged. Name the logical texture
+resources `LOADING_RANDOM_01.TGA`, `LOADING_RANDOM_02.TGA`, and so on. Compiled
+textures therefore use names such as `LOADING_RANDOM_01-C.TEX`.
+
+Discovery starts at `01` and ends at the first missing texture, so the sequence
+must not contain gaps. When no `LOADING_RANDOM_01.TGA` resource exists, the
+game's original loading screen remains unchanged. One texture is selected for
+each savegame load, and the previous image is avoided when at least two are
+available.
+
 ## Daedalus setup
 
 Do not add `userapi/AreaManager.d` to `Gothic.src`. The plugin registers its
